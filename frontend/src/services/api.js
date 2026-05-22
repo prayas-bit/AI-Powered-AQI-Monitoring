@@ -1,80 +1,32 @@
 import axios from 'axios';
 
-// Set up base API url pointing to local Flask server
-const API_BASE_URL = 'http://127.0.0.1:5000/api';
+// ─────────────────────────────────────────────────────────────
+// Dynamic API base URL:
+//   • Development (npm run dev):  http://127.0.0.1:5000/api
+//   • Production  (Vercel):       /_/backend/api  (relative, same-origin)
+// ─────────────────────────────────────────────────────────────
+const API_BASE_URL = import.meta.env.DEV
+  ? 'http://127.0.0.1:5000/api'
+  : '/_/backend/api';
 
 const api = axios.create({
   baseURL: API_BASE_URL,
   headers: {
     'Content-Type': 'application/json',
   },
+  timeout: 30000, // 30s timeout — serverless cold starts can be slow
 });
 
-// Request interceptor to attach JWT token
-api.interceptors.request.use(
-  (config) => {
-    const token = localStorage.getItem('token');
-    if (token) {
-      config.headers.Authorization = `Bearer ${token}`;
-    }
-    return config;
-  },
-  (error) => {
-    return Promise.reject(error);
-  }
-);
-
-// Response interceptor to handle session expiration (expired tokens)
+// Simple error logging interceptor
 api.interceptors.response.use(
   (response) => response,
   (error) => {
-    if (error.response && error.response.status === 401) {
-      // Clear token and user context
-      localStorage.removeItem('token');
-      localStorage.removeItem('user');
-      // Optional: redirect to login
-      if (!window.location.pathname.includes('/login') && window.location.pathname !== '/') {
-        window.location.href = '/login';
-      }
-    }
+    const url = error?.config?.url || 'unknown';
+    const status = error?.response?.status || 'network error';
+    console.error(`[API] ${error.config?.method?.toUpperCase()} ${url} → ${status}`);
     return Promise.reject(error);
   }
 );
-
-export const authService = {
-  login: async (email, password) => {
-    const response = await api.post('/auth/login', { email, password });
-    if (response.data.token) {
-      localStorage.setItem('token', response.data.token);
-      localStorage.setItem('user', JSON.stringify(response.data.user));
-    }
-    return response.data;
-  },
-  
-  register: async (name, email, password, role = 'user') => {
-    const response = await api.post('/auth/register', { name, email, password, role });
-    return response.data;
-  },
-  
-  logout: () => {
-    localStorage.removeItem('token');
-    localStorage.removeItem('user');
-  },
-  
-  getProfile: async () => {
-    const response = await api.get('/auth/profile');
-    return response.data;
-  },
-  
-  getCurrentUser: () => {
-    const userStr = localStorage.getItem('user');
-    try {
-      return userStr ? JSON.parse(userStr) : null;
-    } catch {
-      return null;
-    }
-  }
-};
 
 export const aqiService = {
   getCurrentAqi: async (city) => {
@@ -113,7 +65,7 @@ export const predictionService = {
 
 export const reportService = {
   downloadPdfReport: (city) => {
-    // Returns the full direct link for browser anchor triggers
+    // Uses same dynamic base URL — works on both localhost and Vercel
     return `${API_BASE_URL}/download-pdf?city=${encodeURIComponent(city)}`;
   }
 };

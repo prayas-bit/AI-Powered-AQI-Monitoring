@@ -2,11 +2,27 @@ import json
 import os
 import time
 import threading
-from pymongo import MongoClient
-from pymongo.errors import ConnectionFailure, ConfigurationError
+import sys
+
+try:
+    from pymongo import MongoClient
+    from pymongo.errors import ConnectionFailure, ConfigurationError
+    PYMONGO_AVAILABLE = True
+except ImportError:
+    PYMONGO_AVAILABLE = False
+
 from config import Config
 
+logger_prefix = "[DB]"
+
+def _log(msg):
+    print(f"{logger_prefix} {msg}", file=sys.stdout, flush=True)
+
+
 class LocalJSONCollection:
+    """Thread-safe mock MongoDB collection backed by a JSON file.
+    Used as a fallback when MongoDB Atlas is unavailable (local dev)."""
+
     def __init__(self, db_path, collection_name, lock):
         self.db_path = db_path
         self.collection_name = collection_name
@@ -37,7 +53,7 @@ class LocalJSONCollection:
                 with open(self.db_path, "w", encoding="utf-8") as f:
                     json.dump(all_data, f, indent=2, default=str)
             except Exception as e:
-                print(f"Error writing to local JSON db: {e}")
+                _log(f"Warning: Could not write to local JSON db: {e}")
 
     def _matches_filter(self, doc, filter_dict):
         if not filter_dict:
@@ -75,16 +91,11 @@ class LocalJSONCollection:
         if filter_dict is None:
             filter_dict = {}
         docs = self._read()
-        matched = []
-        for doc in docs:
-            if self._matches_filter(doc, filter_dict):
-                matched.append(doc)
+        matched = [doc for doc in docs if self._matches_filter(doc, filter_dict)]
 
-        # Sorting logic (e.g. [('timestamp', -1)])
         if sort:
             for field, order in reversed(sort):
                 matched.sort(key=lambda x: x.get(field) or "", reverse=(order == -1))
-        
         if limit:
             matched = matched[:limit]
         return matched
@@ -111,7 +122,6 @@ class LocalJSONCollection:
         modified = 0
         for doc in docs:
             if self._matches_filter(doc, filter_dict):
-                # Basic update (supporting only '$set' structure)
                 if "$set" in update_dict:
                     for sk, sv in update_dict["$set"].items():
                         doc[sk] = sv
@@ -124,12 +134,73 @@ class LocalJSONCollection:
     def delete_many(self, filter_dict):
         docs = self._read()
         initial_count = len(docs)
-        new_docs = []
-        for doc in docs:
-            if not self._matches_filter(doc, filter_dict):
-                new_docs.append(doc)
+        new_docs = [doc for doc in docs if not self._matches_filter(doc, filter_dict)]
         self._write(new_docs)
         return type("DeleteResult", (), {"deleted_count": initial_count - len(new_docs)})
+
+
+class InMemoryCollection:
+    """Ephemeral in-memory collection for Vercel serverless (read-only filesystem).
+    Data is lost when the function instance is recycled, but that's fine —
+    MongoDB Atlas is the primary DB on Vercel. This is only for edge cases
+    where MongoDB is temporarily unreachable."""
+
+    def __init__(self, name):
+        self.name = name
+        self._docs = []
+
+    def find_one(self, filter_dict=None):
+        for doc in self._docs:
+            if self._match(doc, filter_dict or {}):
+                return doc
+        return None
+
+    def find(self, filter_dict=None, sort=None, limit=None):
+        matched = [d for d in self._docs if self._match(d, filter_dict or {})]
+        if sort:
+            for field, order in reversed(sort):
+                matched.sort(key=lambda x: x.get(field) or "", reverse=(order == -1))
+        if limit:
+            matched = matched[:limit]
+        return matched
+
+    def insert_one(self, doc):
+        if "_id" not in doc:
+            doc["_id"] = str(int(time.time() * 1000))
+        self._docs.append(doc)
+        return type("InsertOneResult", (), {"inserted_id": doc["_id"]})
+
+    def insert_many(self, new_docs):
+        for doc in new_docs:
+            if "_id" not in doc:
+                doc["_id"] = str(int(time.time() * 1000)) + "_" + os.urandom(4).hex()
+            self._docs.append(doc)
+        return True
+
+    def update_one(self, filter_dict, update_dict):
+        for doc in self._docs:
+            if self._match(doc, filter_dict):
+                if "$set" in update_dict:
+                    doc.update(update_dict["$set"])
+                    return type("UpdateResult", (), {"modified_count": 1})
+        return type("UpdateResult", (), {"modified_count": 0})
+
+    def delete_many(self, filter_dict):
+        before = len(self._docs)
+        self._docs = [d for d in self._docs if not self._match(d, filter_dict)]
+        return type("DeleteResult", (), {"deleted_count": before - len(self._docs)})
+
+    def _match(self, doc, f):
+        import re
+        for k, v in f.items():
+            dv = doc.get(k)
+            if isinstance(v, dict) and "$regex" in v:
+                flags = re.IGNORECASE if "i" in v.get("$options", "") else 0
+                if dv is None or not re.search(v["$regex"], str(dv), flags):
+                    return False
+            elif dv != v:
+                return False
+        return True
 
 
 class DatabaseWrapper:
@@ -138,39 +209,59 @@ class DatabaseWrapper:
         self.db = None
         self.is_fallback = False
         self.lock = threading.Lock()
+
+        # For local dev: use the JSON file in the backend directory
         self.fallback_path = os.path.join(os.path.dirname(__file__), "..", "db_fallback.json")
-        
+
         self.init_db()
 
     def init_db(self):
         if not Config.MONGO_URI:
-            self._setup_fallback("No MONGO_URI configured. Using fallback local JSON Database.")
+            self._setup_fallback("No MONGO_URI configured. Using fallback database.")
+            return
+
+        if not PYMONGO_AVAILABLE:
+            self._setup_fallback("pymongo not available. Using fallback database.")
             return
 
         try:
-            # Connect with a short timeout to fail fast if DB is down or credentials incorrect
-            self.client = MongoClient(Config.MONGO_URI, serverSelectionTimeoutMS=2000)
-            # Try a ping command
+            self.client = MongoClient(
+                Config.MONGO_URI,
+                serverSelectionTimeoutMS=5000,
+                connectTimeoutMS=5000,
+                socketTimeoutMS=10000,
+            )
+            # Verify connectivity
             self.client.admin.command('ping')
-            
-            # Extract database name from connection string or default
+
+            # Extract database name from URI or use default
             db_name = "aqi_safety_db"
-            if "/" in Config.MONGO_URI.split("://")[-1]:
-                parsed_name = Config.MONGO_URI.split("/")[-1].split("?")[0]
+            uri_path = Config.MONGO_URI.split("://")[-1]
+            if "/" in uri_path:
+                parsed_name = uri_path.split("/")[-1].split("?")[0]
                 if parsed_name:
                     db_name = parsed_name
             self.db = self.client[db_name]
-            print(f"Successfully connected to MongoDB Atlas database: {db_name}")
-        except (ConnectionFailure, ConfigurationError, Exception) as e:
-            self._setup_fallback(f"Failed to connect to MongoDB Atlas. Fallback to local JSON. Error: {e}")
+            _log(f"Connected to MongoDB Atlas: {db_name}")
+        except Exception as e:
+            self._setup_fallback(f"MongoDB connection failed ({e}). Using fallback database.")
 
     def _setup_fallback(self, reason):
-        print(reason)
+        _log(reason)
         self.is_fallback = True
-        # Initialize collections as JSON mockups
-        self.users_col = LocalJSONCollection(self.fallback_path, "users", self.lock)
-        self.aqi_col = LocalJSONCollection(self.fallback_path, "aqi_data", self.lock)
-        self.pred_col = LocalJSONCollection(self.fallback_path, "predictions", self.lock)
+
+        if Config.IS_VERCEL:
+            # Vercel has a READ-ONLY filesystem — use in-memory collections
+            _log("Vercel detected -> using in-memory fallback (ephemeral)")
+            self.users_col = InMemoryCollection("users")
+            self.aqi_col = InMemoryCollection("aqi_data")
+            self.pred_col = InMemoryCollection("predictions")
+        else:
+            # Local dev — use JSON file fallback (read/write)
+            _log(f"Local dev -> using JSON fallback at {self.fallback_path}")
+            self.users_col = LocalJSONCollection(self.fallback_path, "users", self.lock)
+            self.aqi_col = LocalJSONCollection(self.fallback_path, "aqi_data", self.lock)
+            self.pred_col = LocalJSONCollection(self.fallback_path, "predictions", self.lock)
 
     @property
     def users(self):

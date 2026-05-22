@@ -26,7 +26,8 @@ def download_pdf():
     predict_data = predict_future_aqi(city)
     
     # Fetch 7 days of historical logs
-    hist_data = db.aqi_data.find({"city": {"$regex": f"^{city}$", "$options": "i"}}, sort=[("timestamp", 1)])
+    cursor = db.aqi_data.find({"city": {"$regex": f"^{city}$", "$options": "i"}}, sort=[("timestamp", 1)])
+    hist_data = list(cursor)
     if not hist_data or len(hist_data) < 10:
         hist_data = AQIService.get_historical_data(city, days=7)
     

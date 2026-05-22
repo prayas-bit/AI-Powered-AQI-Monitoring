@@ -9,7 +9,12 @@ except ImportError:
     HAS_ML_LIBRARIES = False
 from services.aqi_service import AQIService
 
-MODEL_DIR = os.path.dirname(os.path.abspath(__file__))
+from config import Config
+
+if Config.IS_VERCEL:
+    MODEL_DIR = "/tmp"
+else:
+    MODEL_DIR = os.path.dirname(os.path.abspath(__file__))
 
 def prepare_features(df):
     """

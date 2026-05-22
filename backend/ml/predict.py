@@ -13,7 +13,12 @@ except ImportError:
 
 from services.aqi_service import AQIService
 
-MODEL_DIR = os.path.dirname(os.path.abspath(__file__))
+from config import Config
+
+if Config.IS_VERCEL:
+    MODEL_DIR = "/tmp"
+else:
+    MODEL_DIR = os.path.dirname(os.path.abspath(__file__))
 
 def get_or_train_model(city):
     """

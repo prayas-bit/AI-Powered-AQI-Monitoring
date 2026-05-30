@@ -68,8 +68,8 @@ const Navbar = ({ activeTab, setActiveTab }) => {
               className="font-display font-bold text-lg tracking-tight text-white block leading-none"
               style={{ fontFamily: "'Space Grotesk', sans-serif" }}
             >
-              AERO
-              <span style={{ color: CYBER }}>SHIELD</span>
+              AQI
+              <span style={{ color: CYBER }}> PREDICTION</span>
             </span>
             <span
               className="block text-[10px] font-semibold uppercase tracking-widest mt-0.5"

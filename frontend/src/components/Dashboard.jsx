@@ -44,6 +44,13 @@ const Dashboard = () => {
     fetchData();
   }, [city, refreshKey]);
 
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setRefreshKey(prev => prev + 1);
+    }, 60000); // Auto-refresh every minute
+    return () => clearInterval(interval);
+  }, []);
+
   const handleSearchSubmit = (e) => {
     e.preventDefault();
     const query = searchQuery.trim();
@@ -114,7 +121,7 @@ const Dashboard = () => {
             Real-Time Monitoring
           </p>
           <h1 className="font-display font-black text-white leading-none" style={{ fontSize: 'clamp(1.8rem, 4vw, 3rem)' }}>
-            AQI & Construction<br />
+            AQI Prediction<br />
             <span style={{ color: CYBER }}>Safety Dashboard</span>
           </h1>
           <p className="text-sm mt-2" style={{ color: 'rgba(232,232,236,0.4)' }}>

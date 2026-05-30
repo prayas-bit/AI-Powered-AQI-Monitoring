@@ -34,7 +34,7 @@ function App() {
         <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-3 text-xs" style={{ color: 'rgba(232,232,236,0.35)' }}>
           <div className="flex items-center gap-2">
             <Wind size={13} style={{ color: '#F5E642' }} />
-            <span className="font-semibold" style={{ color: 'rgba(232,232,236,0.55)' }}>AeroShield HSE</span>
+            <span className="font-semibold" style={{ color: 'rgba(232,232,236,0.55)' }}>AQI Prediction</span>
             <span>© 2026. All rights reserved.</span>
           </div>
           <div className="flex items-center gap-1">

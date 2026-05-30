@@ -2,8 +2,38 @@ import math
 import random
 import time
 import requests
+import re
 from datetime import datetime, timedelta
 from config import Config
+
+# Mapping of supported cities to aqicn.org URL paths for accurate ground station scraping
+AQICN_URL_MAP = {
+    "Bengaluru - Silk Board": "india/bengaluru/silk-board",
+    "Bengaluru - Peenya Industrial Area": "india/bangalore/peenya",
+    "Bengaluru - City Railway Station": "india/bangalore/city-railway-station",
+    "Bengaluru - Whitefield IT Hub": "bangalore/whitefield",
+    "Bengaluru - Hebbal Outer Ring Road": "india/bengaluru/hebbal",
+    "New Delhi - ITO": "delhi/ito",
+    "New Delhi - Anand Vihar": "delhi/anand-vihar",
+    "New Delhi - Dwarka Sector 8": "delhi/dwarka-sector-8",
+    "New Delhi - RK Puram": "delhi/r.k.-puram",
+    "New Delhi - Connaught Place": "delhi/mandir-marg",
+    "Mumbai - Bandra Kurla Complex": "india/mumbai/bandra-kurla-complex",
+    "Mumbai - Chembur": "mumbai/chembur",
+    "Mumbai - Colaba Clean Air": "india/mumbai/colaba",
+    "Mumbai - Andheri East": "mumbai/andheri-east",
+    "New York - Bronx Traffic Corridor": "usa/newyork/bronx",
+    "New York - Central Park Baseline": "usa/newyork/ccny",
+    "New York - Queens Industrial": "usa/newyork/queens-college",
+    "London - Westminster Roadside": "london/westminster",
+    "London - Greenwich Environment": "london/greenwich",
+    "London - City of London Center": "london/city",
+    "Tokyo - Shinjuku Highway Station": "tokyo/shinjuku",
+    "Tokyo - Shibuya Center": "tokyo/shibuya",
+    "Tokyo - Koto Industrial Outer": "tokyo/koto",
+    "Sydney - CBD Macquarie Street": "sydney/macquarie-street",
+    "Sydney - Parramatta Transit": "sydney/parramatta",
+}
 
 # Standard coordinate mapping for supported cities
 CITIES_COORDS = {
@@ -69,25 +99,42 @@ class AQIService:
         if not matched_city:
             # Dynamically register new searched city
             matched_city = city
-            # Seed based on city name to keep dynamic values consistent across searches
-            rng_city = random.Random(f"coords-{city.lower()}")
+            coords = AQIService._geocode_city(city)
+            if coords:
+                lat = coords["lat"]
+                lon = coords["lon"]
+            else:
+                rng_city = random.Random(f"coords-{city.lower()}")
+                lat = 10.0 + rng_city.random() * 40
+                lon = -100.0 + rng_city.random() * 200
+
             CITIES_COORDS[city] = {
-                "lat": 10.0 + rng_city.random() * 40,
-                "lon": -100.0 + rng_city.random() * 200,
-                "base_aqi": rng_city.randint(30, 250),
-                "industry": rng_city.choice(["low", "moderate", "high"])
+                "lat": lat,
+                "lon": lon,
+                "base_aqi": 80,
+                "industry": "moderate"
             }
 
         # If API keys are set, attempt real API fetches
         if not Config.FORCE_SIMULATOR:
-            if Config.WAQI_API_TOKEN:
+            # First, attempt to scrape real-time ground station data from aqicn.org
+            res = AQIService._fetch_aqicn_scraped(matched_city)
+            if res:
+                return res
+
+            if Config.WAQI_API_TOKEN and Config.WAQI_API_TOKEN != "your_real_waqi_api_token_here":
                 res = AQIService._fetch_waqi_current(matched_city)
                 if res:
                     return res
-            if Config.OPENAQ_API_KEY:
+            if Config.OPENAQ_API_KEY and Config.OPENAQ_API_KEY != "your_real_openaq_api_key_here":
                 res = AQIService._fetch_openaq_current(matched_city)
                 if res:
                     return res
+            
+            # Default to Open-Meteo for real data
+            res = AQIService._fetch_openmeteo_current(matched_city)
+            if res:
+                return res
         
         # Default to simulator
         return AQIService._simulate_current(matched_city)
@@ -106,12 +153,254 @@ class AQIService:
                 break
         if not matched_city:
             matched_city = city
+            coords = AQIService._geocode_city(city)
+            if coords:
+                lat = coords["lat"]
+                lon = coords["lon"]
+            else:
+                lat = 20.0
+                lon = 70.0
+
             CITIES_COORDS[city] = {
-                "lat": 20.0, "lon": 70.0, "base_aqi": 80, "industry": "moderate"
+                "lat": lat,
+                "lon": lon,
+                "base_aqi": 80,
+                "industry": "moderate"
             }
+
+        if not Config.FORCE_SIMULATOR:
+            res = AQIService._fetch_openmeteo_historical(matched_city, days)
+            if res:
+                # Dynamically calibrate historical data to match ground-station measurements
+                calibrated = False
+                try:
+                    scraped_curr = AQIService._fetch_aqicn_scraped(matched_city)
+                    if scraped_curr:
+                        scraped_aqi = scraped_curr["aqi"]
+                        om_curr = AQIService._fetch_openmeteo_current(matched_city)
+                        if om_curr:
+                            om_aqi = om_curr.get("raw_aqi", om_curr["aqi"])
+                            if om_aqi > 0 and scraped_aqi > 0:
+                                ratio = scraped_aqi / om_aqi
+                                # Clamp ratio to a reasonable range [0.05, 10.0] to prevent extreme distortion
+                                ratio = max(0.05, min(10.0, ratio))
+                                for record in res:
+                                    record["aqi"] = max(5, min(500, int(record["aqi"] * ratio)))
+                                    record["pm25"] = max(1.0, round(record["pm25"] * ratio, 1))
+                                    record["pm10"] = max(2.0, round(record["pm10"] * ratio, 1))
+                                    record["no2"] = max(0.5, round(record["no2"] * ratio, 1))
+                                    record["so2"] = max(0.1, round(record["so2"] * ratio, 1))
+                                    record["co"] = max(0.01, round(record["co"] * ratio, 2))
+                                calibrated = True
+                except Exception as e:
+                    print(f"Error calibrating historical data for {matched_city}: {e}")
+                
+                # If calibration was not performed, ensure AQI is clamped to 500
+                if not calibrated:
+                    for record in res:
+                        record["aqi"] = min(500, int(record["aqi"]))
+                return res
 
         # Simulated historical data generator (highly correlated curves)
         return AQIService._simulate_historical(matched_city, days)
+
+    @staticmethod
+    def _fetch_aqicn_scraped(city):
+        """
+        Scrapes real-time ground-level station sensor measurements from aqicn.org.
+        Uses a predefined mapping of city_key to aqicn.org URL path.
+        """
+        try:
+            path = AQICN_URL_MAP.get(city)
+            if not path:
+                return None
+            
+            url = f"https://aqicn.org/city/{path}/"
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            }
+            res = requests.get(url, headers=headers, timeout=10)
+            if res.status_code != 200:
+                return None
+            
+            html = res.text
+            
+            # Extract main AQI
+            aqi_match = re.search(r'<div[^>]*class=["\'][^"\']*aqivalue[^"\']*["\'][^>]*>([^<]+)</div>', html)
+            if not aqi_match:
+                return None
+                
+            aqi_str = aqi_match.group(1).strip()
+            if not aqi_str.isdigit():
+                return None
+            aqi = int(aqi_str)
+            
+            # Extract pollutants
+            pollutants = {}
+            for p in ["pm25", "pm10", "o3", "no2", "so2", "co", "t", "h", "w"]:
+                pattern = rf"<td[^>]*id=['\"]cur_{p}['\'][^>]*>(.*?)</td>"
+                match = re.search(pattern, html, re.DOTALL)
+                if match:
+                    val_str = re.sub(r'<[^>]*>', '', match.group(1)).strip()
+                    val_match = re.search(r'[-+]?\d*\.\d+|\d+', val_str)
+                    if val_match:
+                        pollutants[p] = float(val_match.group(0))
+                    else:
+                        pollutants[p] = None
+                else:
+                    pollutants[p] = None
+            
+            # If standard elements are missing, interpolate proportionally relative to the overall scraped AQI
+            pm25 = pollutants.get("pm25") if pollutants.get("pm25") is not None else aqi * 0.75
+            pm10 = pollutants.get("pm10") if pollutants.get("pm10") is not None else aqi * 1.25
+            no2 = pollutants.get("no2") if pollutants.get("no2") is not None else aqi * 0.35
+            so2 = pollutants.get("so2") if pollutants.get("so2") is not None else aqi * 0.12
+            co = pollutants.get("co") if pollutants.get("co") is not None else aqi * 0.008
+            
+            # Temperature, humidity, wind
+            temp = pollutants.get("t") if pollutants.get("t") is not None else 25.0
+            humi = pollutants.get("h") if pollutants.get("h") is not None else 60.0
+            wind = pollutants.get("w") if pollutants.get("w") is not None else 10.0
+            
+            # Clamp CO in ppm if it seems to be reported as a sub-index/AQI instead of concentration
+            if co > 5.0:
+                co = min(5.0, co / 10.0)
+                
+            return AQIService._format_response(city, aqi, pm25, pm10, no2, so2, co, temp, humi, wind)
+        except Exception as e:
+            print(f"Error scraping AQICN for {city}: {e}")
+        return None
+
+    # --- Open-Meteo & Geocoding Client ---
+    @staticmethod
+    def _geocode_city(city):
+        try:
+            url = f"https://geocoding-api.open-meteo.com/v1/search?name={city}&count=1&language=en&format=json"
+            res = requests.get(url, timeout=5)
+            if res.status_code == 200:
+                results = res.json().get("results")
+                if results and len(results) > 0:
+                    return {
+                        "lat": results[0]["latitude"],
+                        "lon": results[0]["longitude"]
+                    }
+        except Exception as e:
+            print(f"Error geocoding city {city}: {e}")
+        return None
+
+    @staticmethod
+    def _fetch_openmeteo_current(city):
+        try:
+            city_coords = CITIES_COORDS.get(city)
+            if not city_coords:
+                return None
+            lat = city_coords["lat"]
+            lon = city_coords["lon"]
+            
+            # Fetch Air Quality
+            aq_url = f"https://air-quality-api.open-meteo.com/v1/air-quality?latitude={lat}&longitude={lon}&current=pm2_5,pm10,carbon_monoxide,nitrogen_dioxide,sulphur_dioxide,us_aqi"
+            aq_res = requests.get(aq_url, timeout=10)
+            if aq_res.status_code != 200:
+                return None
+            aq_data = aq_res.json().get("current", {})
+            
+            # Fetch Weather
+            w_url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current=temperature_2m,relative_humidity_2m,wind_speed_10m"
+            w_res = requests.get(w_url, timeout=10)
+            if w_res.status_code != 200:
+                return None
+            w_data = w_res.json().get("current", {})
+            
+            # Parse parameters
+            aqi_val = aq_data.get("us_aqi", 50)
+            aqi = int(aqi_val) if aqi_val is not None else 50
+            pm25 = aq_data.get("pm2_5", 0.0)
+            pm10 = aq_data.get("pm10", 0.0)
+            
+            # Unit conversions (ug/m3 to ppm / ppb)
+            co_ug = aq_data.get("carbon_monoxide", 0.0)
+            no2_ug = aq_data.get("nitrogen_dioxide", 0.0)
+            so2_ug = aq_data.get("sulphur_dioxide", 0.0)
+            
+            co = co_ug * 0.000873 if co_ug is not None else 0.0
+            no2 = no2_ug / 1.88 if no2_ug is not None else 0.0
+            so2 = so2_ug / 2.62 if so2_ug is not None else 0.0
+            
+            temp = w_data.get("temperature_2m", 25.0)
+            humi = w_data.get("relative_humidity_2m", 60.0)
+            wind = w_data.get("wind_speed_10m", 10.0)
+            
+            return AQIService._format_response(city, aqi, pm25, pm10, no2, so2, co, temp, humi, wind)
+        except Exception as e:
+            print(f"Error fetching from Open-Meteo API for {city}: {e}")
+        return None
+
+    @staticmethod
+    def _fetch_openmeteo_historical(city, days):
+        try:
+            city_coords = CITIES_COORDS.get(city)
+            if not city_coords:
+                return None
+            lat = city_coords["lat"]
+            lon = city_coords["lon"]
+            
+            # Fetch Air Quality History
+            aq_url = f"https://air-quality-api.open-meteo.com/v1/air-quality?latitude={lat}&longitude={lon}&hourly=pm2_5,pm10,carbon_monoxide,nitrogen_dioxide,sulphur_dioxide,us_aqi&past_days={days}&forecast_days=1"
+            aq_res = requests.get(aq_url, timeout=15)
+            if aq_res.status_code != 200:
+                return None
+            aq_hourly = aq_res.json().get("hourly", {})
+            
+            # Fetch Weather History
+            w_url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&hourly=temperature_2m,relative_humidity_2m,wind_speed_10m&past_days={days}&forecast_days=1"
+            w_res = requests.get(w_url, timeout=15)
+            if w_res.status_code != 200:
+                return None
+            w_hourly = w_res.json().get("hourly", {})
+            
+            # Align records
+            time_list = aq_hourly.get("time", [])
+            records = []
+            
+            for i in range(len(time_list)):
+                timestamp_str = time_list[i]
+                dt = datetime.strptime(timestamp_str, "%Y-%m-%dT%H:%M")
+                
+                aqi_val = aq_hourly.get("us_aqi", [])[i]
+                aqi = int(aqi_val) if aqi_val is not None else 50
+                pm25 = aq_hourly.get("pm2_5", [])[i]
+                pm10 = aq_hourly.get("pm10", [])[i]
+                
+                co_ug = aq_hourly.get("carbon_monoxide", [])[i]
+                no2_ug = aq_hourly.get("nitrogen_dioxide", [])[i]
+                so2_ug = aq_hourly.get("sulphur_dioxide", [])[i]
+                
+                co = co_ug * 0.000873 if co_ug is not None else 0.0
+                no2 = no2_ug / 1.88 if no2_ug is not None else 0.0
+                so2 = so2_ug / 2.62 if so2_ug is not None else 0.0
+                
+                temp = w_hourly.get("temperature_2m", [])[i]
+                humi = w_hourly.get("relative_humidity_2m", [])[i]
+                wind = w_hourly.get("wind_speed_10m", [])[i]
+                
+                records.append({
+                    "city": city,
+                    "timestamp": dt.strftime("%Y-%m-%d %H:%M:%S"),
+                    "aqi": aqi,
+                    "pm25": pm25 if pm25 is not None else 0.0,
+                    "pm10": pm10 if pm10 is not None else 0.0,
+                    "no2": round(no2, 1),
+                    "so2": round(so2, 1),
+                    "co": round(co, 2),
+                    "temperature": round(temp, 1) if temp is not None else 25.0,
+                    "humidity": round(humi, 1) if humi is not None else 60.0,
+                    "wind_speed": round(wind, 1) if wind is not None else 10.0,
+                })
+            
+            return records
+        except Exception as e:
+            print(f"Error fetching historical from Open-Meteo for {city}: {e}")
+        return None
 
     # --- WAQI API Client ---
     @staticmethod
@@ -329,7 +618,8 @@ class AQIService:
 
         return {
             "city": city,
-            "aqi": aqi,
+            "aqi": min(500, int(aqi)),
+            "raw_aqi": int(aqi),
             "category": category,
             "pm25": round(pm25, 1),
             "pm10": round(pm10, 1),

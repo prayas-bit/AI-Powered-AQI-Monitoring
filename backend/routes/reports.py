@@ -144,7 +144,7 @@ def download_pdf():
     story = []
     
     # Document Header
-    story.append(Paragraph("AI-Powered AQI & Construction Safety Report", title_style))
+    story.append(Paragraph("AI-Powered AQI Prediction Safety Report", title_style))
     story.append(Paragraph(f"Location: {city} | Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} (UTC) | Status: Official Environmental Log", subtitle_style))
     story.append(Spacer(1, 10))
     

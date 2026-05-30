@@ -409,7 +409,7 @@ const ReportPage = () => {
               {/* Fake PDF Header */}
               <div className="flex justify-between items-start pb-4" style={{ borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
                 <div>
-                  <h4 className="font-display font-extrabold text-white text-base">AEROSHIIELD ENVIRONMENTAL AUDIT</h4>
+                  <h4 className="font-display font-extrabold text-white text-base">AQI PREDICTION ENVIRONMENTAL AUDIT</h4>
                   <span className="text-[10px] text-slate-400 font-mono">STATION ID: {currentData.city.toUpperCase()}_MUNI_01</span>
                 </div>
                 <div className="text-right">

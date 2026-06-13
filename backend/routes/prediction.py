@@ -4,6 +4,8 @@ from models.db import db
 from datetime import datetime
 import threading
 import time
+from zoneinfo import ZoneInfo
+from services.aqi_service import get_city_timezone
 
 prediction_bp = Blueprint("prediction", __name__)
 
@@ -114,12 +116,14 @@ def get_predict_aqi():
     # DB log is non-blocking
     def _write_db():
         try:
+            tz_name = get_city_timezone(city)
+            local_now = datetime.now(ZoneInfo(tz_name))
             db.predictions.delete_many({"city": {"$regex": f"^{city}$", "$options": "i"}})
             db.predictions.insert_one({
                 "city":          city,
                 "next_hour_aqi": next_hour_aqi,
                 "tomorrow_aqi":  tomorrow_aqi,
-                "timestamp":     datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                "timestamp":     local_now.strftime("%Y-%m-%d %H:%M:%S")
             })
         except Exception:
             pass

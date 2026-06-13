@@ -5,34 +5,53 @@ import requests
 import re
 from datetime import datetime, timedelta
 from config import Config
+from zoneinfo import ZoneInfo
+
+def get_city_timezone(city_name):
+    # Find which city in our map matches the station prefix
+    cities_tz = {
+        "bengaluru": "Asia/Kolkata",
+        "new delhi": "Asia/Kolkata",
+        "mumbai": "Asia/Kolkata",
+        "new york": "America/New_York",
+        "london": "Europe/London",
+        "tokyo": "Asia/Tokyo",
+        "sydney": "Australia/Sydney"
+    }
+    city_lower = city_name.lower()
+    for prefix, tz in cities_tz.items():
+        if city_lower.startswith(prefix):
+            return tz
+    return "UTC"
+
 
 # Mapping of supported cities to aqicn.org URL paths for accurate ground station scraping
 AQICN_URL_MAP = {
     "Bengaluru - Silk Board": "india/bengaluru/silk-board",
     "Bengaluru - Peenya Industrial Area": "india/bangalore/peenya",
     "Bengaluru - City Railway Station": "india/bangalore/city-railway-station",
-    "Bengaluru - Whitefield IT Hub": "bangalore/whitefield",
+    "Bengaluru - Whitefield IT Hub": "india/bengaluru/bwssb-kadabesanahalli", # Kadubeesanahalli represents Whitefield corridor
     "Bengaluru - Hebbal Outer Ring Road": "india/bengaluru/hebbal",
     "New Delhi - ITO": "delhi/ito",
     "New Delhi - Anand Vihar": "delhi/anand-vihar",
-    "New Delhi - Dwarka Sector 8": "delhi/dwarka-sector-8",
+    "New Delhi - Dwarka Sector 8": "delhi/national-institute-of-malaria-research--sector-8--dwarka",
     "New Delhi - RK Puram": "delhi/r.k.-puram",
     "New Delhi - Connaught Place": "delhi/mandir-marg",
     "Mumbai - Bandra Kurla Complex": "india/mumbai/bandra-kurla-complex",
-    "Mumbai - Chembur": "mumbai/chembur",
+    "Mumbai - Chembur": "india/mumbai/deonar", # Deonar represents Chembur area
     "Mumbai - Colaba Clean Air": "india/mumbai/colaba",
-    "Mumbai - Andheri East": "mumbai/andheri-east",
-    "New York - Bronx Traffic Corridor": "usa/newyork/bronx",
+    "Mumbai - Andheri East": "india/mumbai/chakala-andheri-east",
+    "New York - Bronx Traffic Corridor": "usa/newyork/is-74",
     "New York - Central Park Baseline": "usa/newyork/ccny",
     "New York - Queens Industrial": "usa/newyork/queens-college",
-    "London - Westminster Roadside": "london/westminster",
-    "London - Greenwich Environment": "london/greenwich",
-    "London - City of London Center": "london/city",
-    "Tokyo - Shinjuku Highway Station": "tokyo/shinjuku",
-    "Tokyo - Shibuya Center": "tokyo/shibuya",
-    "Tokyo - Koto Industrial Outer": "tokyo/koto",
-    "Sydney - CBD Macquarie Street": "sydney/macquarie-street",
-    "Sydney - Parramatta Transit": "sydney/parramatta",
+    "London - Westminster Roadside": "united-kingdom/london-westminster",
+    "London - Greenwich Environment": "united-kingdom/greenwich-trafalgar-road-hoskins-st",
+    "London - City of London Center": "united-kingdom/city-of-london-sir-john-cass-school",
+    "Tokyo - Shinjuku Highway Station": "japan/shinjuku-ku-/kuni-shinjuku",
+    "Tokyo - Shibuya Center": "japan/shibuyaku/shibuyakuudagawamachi",
+    "Tokyo - Koto Industrial Outer": "japan/kotoku/kotokuoshima",
+    "Sydney - CBD Macquarie Street": "australia/nsw/macquarie-park/sydney-east",
+    "Sydney - Parramatta Transit": "australia/nsw/north-parramatta/sydney-north-west",
 }
 
 # Standard coordinate mapping for supported cities
@@ -117,15 +136,16 @@ class AQIService:
 
         # If API keys are set, attempt real API fetches
         if not Config.FORCE_SIMULATOR:
-            # First, attempt to scrape real-time ground station data from aqicn.org
-            res = AQIService._fetch_aqicn_scraped(matched_city)
-            if res:
-                return res
-
             if Config.WAQI_API_TOKEN and Config.WAQI_API_TOKEN != "your_real_waqi_api_token_here":
                 res = AQIService._fetch_waqi_current(matched_city)
                 if res:
                     return res
+
+            # Fallback to scraping if API token is missing or API fails/stale
+            res = AQIService._fetch_aqicn_scraped(matched_city)
+            if res:
+                return res
+
             if Config.OPENAQ_API_KEY and Config.OPENAQ_API_KEY != "your_real_openaq_api_key_here":
                 res = AQIService._fetch_openaq_current(matched_city)
                 if res:
@@ -174,14 +194,14 @@ class AQIService:
                 # Dynamically calibrate historical data to match ground-station measurements
                 calibrated = False
                 try:
-                    scraped_curr = AQIService._fetch_aqicn_scraped(matched_city)
-                    if scraped_curr:
-                        scraped_aqi = scraped_curr["aqi"]
+                    current_curr = AQIService.get_current_aqi(matched_city)
+                    if current_curr:
+                        curr_aqi = current_curr["aqi"]
                         om_curr = AQIService._fetch_openmeteo_current(matched_city)
                         if om_curr:
                             om_aqi = om_curr.get("raw_aqi", om_curr["aqi"])
-                            if om_aqi > 0 and scraped_aqi > 0:
-                                ratio = scraped_aqi / om_aqi
+                            if om_aqi > 0 and curr_aqi > 0:
+                                ratio = curr_aqi / om_aqi
                                 # Clamp ratio to a reasonable range [0.05, 10.0] to prevent extreme distortion
                                 ratio = max(0.05, min(10.0, ratio))
                                 for record in res:
@@ -199,10 +219,18 @@ class AQIService:
                 if not calibrated:
                     for record in res:
                         record["aqi"] = min(500, int(record["aqi"]))
+                
+                tz_name = get_city_timezone(matched_city)
+                current_local_time = datetime.now(ZoneInfo(tz_name)).strftime("%Y-%m-%d %H:%M:%S")
+                res = [record for record in res if record["timestamp"] <= current_local_time]
                 return res
 
         # Simulated historical data generator (highly correlated curves)
-        return AQIService._simulate_historical(matched_city, days)
+        res = AQIService._simulate_historical(matched_city, days)
+        tz_name = get_city_timezone(matched_city)
+        current_local_time = datetime.now(ZoneInfo(tz_name)).strftime("%Y-%m-%d %H:%M:%S")
+        res = [record for record in res if record["timestamp"] <= current_local_time]
+        return res
 
     @staticmethod
     def _fetch_aqicn_scraped(city):
@@ -225,6 +253,17 @@ class AQIService:
             
             html = res.text
             
+            # Check for stale data (older than 24 hours) from checkWidgetUpdateTime call in script
+            time_match = re.search(r'checkWidgetUpdateTime\(\s*(\d+)\s*,', html)
+            if time_match:
+                try:
+                    scraped_epoch = int(time_match.group(1))
+                    if time.time() - scraped_epoch > 24 * 3600:
+                        print(f"Scraped AQICN data for {city} is stale (epoch: {scraped_epoch}). Falling back.")
+                        return None
+                except Exception as e:
+                    print(f"Error parsing scraped epoch: {e}")
+
             # Extract main AQI
             aqi_match = re.search(r'<div[^>]*class=["\'][^"\']*aqivalue[^"\']*["\'][^>]*>([^<]+)</div>', html)
             if not aqi_match:
@@ -297,8 +336,9 @@ class AQIService:
             lat = city_coords["lat"]
             lon = city_coords["lon"]
             
+            tz_name = get_city_timezone(city)
             # Fetch Air Quality
-            aq_url = f"https://air-quality-api.open-meteo.com/v1/air-quality?latitude={lat}&longitude={lon}&current=pm2_5,pm10,carbon_monoxide,nitrogen_dioxide,sulphur_dioxide,us_aqi"
+            aq_url = f"https://air-quality-api.open-meteo.com/v1/air-quality?latitude={lat}&longitude={lon}&current=pm2_5,pm10,carbon_monoxide,nitrogen_dioxide,sulphur_dioxide,us_aqi&timezone={tz_name}"
             aq_res = requests.get(aq_url, timeout=10)
             if aq_res.status_code != 200:
                 return None
@@ -344,15 +384,16 @@ class AQIService:
             lat = city_coords["lat"]
             lon = city_coords["lon"]
             
+            tz_name = get_city_timezone(city)
             # Fetch Air Quality History
-            aq_url = f"https://air-quality-api.open-meteo.com/v1/air-quality?latitude={lat}&longitude={lon}&hourly=pm2_5,pm10,carbon_monoxide,nitrogen_dioxide,sulphur_dioxide,us_aqi&past_days={days}&forecast_days=1"
+            aq_url = f"https://air-quality-api.open-meteo.com/v1/air-quality?latitude={lat}&longitude={lon}&hourly=pm2_5,pm10,carbon_monoxide,nitrogen_dioxide,sulphur_dioxide,us_aqi&past_days={days}&forecast_days=1&timezone={tz_name}"
             aq_res = requests.get(aq_url, timeout=15)
             if aq_res.status_code != 200:
                 return None
             aq_hourly = aq_res.json().get("hourly", {})
             
             # Fetch Weather History
-            w_url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&hourly=temperature_2m,relative_humidity_2m,wind_speed_10m&past_days={days}&forecast_days=1"
+            w_url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&hourly=temperature_2m,relative_humidity_2m,wind_speed_10m&past_days={days}&forecast_days=1&timezone={tz_name}"
             w_res = requests.get(w_url, timeout=15)
             if w_res.status_code != 200:
                 return None
@@ -406,11 +447,27 @@ class AQIService:
     @staticmethod
     def _fetch_waqi_current(city):
         try:
-            url = f"https://api.waqi.info/feed/{city}/?token={Config.WAQI_API_TOKEN}"
+            path = AQICN_URL_MAP.get(city, city)
+            url = f"https://api.waqi.info/feed/{path}/?token={Config.WAQI_API_TOKEN}"
             response = requests.get(url, timeout=5)
             data = response.json()
             if data.get("status") == "ok" and "data" in data:
                 payload = data["data"]
+                
+                # Check for stale data (older than 24 hours)
+                time_payload = payload.get("time", {})
+                stime = time_payload.get("s")
+                if stime:
+                    try:
+                        report_dt = datetime.strptime(stime, "%Y-%m-%d %H:%M:%S")
+                        tz_name = get_city_timezone(city)
+                        local_now = datetime.now(ZoneInfo(tz_name)).replace(tzinfo=None)
+                        if local_now - report_dt > timedelta(hours=24):
+                            print(f"WAQI data for {city} is stale (reported at {stime}). Falling back.")
+                            return None
+                    except Exception as e:
+                        print(f"Error parsing WAQI time: {e}")
+                        
                 aqi = payload.get("aqi", 50)
                 iaqi = payload.get("iaqi", {})
                 
@@ -422,9 +479,22 @@ class AQIService:
                 co = iaqi.get("co", {}).get("v", aqi * 0.01)
                 
                 # Fetch weather
-                temp = iaqi.get("t", {}).get("v", random.randint(15, 35))
-                humi = iaqi.get("h", {}).get("v", random.randint(30, 85))
-                wind = iaqi.get("w", {}).get("v", random.randint(2, 20))
+                temp = iaqi.get("t", {}).get("v")
+                humi = iaqi.get("h", {}).get("v")
+                wind = iaqi.get("w", {}).get("v")
+                
+                # If weather values are missing from WAQI, fetch from Open-Meteo
+                if temp is None or humi is None or wind is None:
+                    om_w = AQIService._fetch_openmeteo_current(city)
+                    if om_w:
+                        if temp is None: temp = om_w["temperature"]
+                        if humi is None: humi = om_w["humidity"]
+                        if wind is None: wind = om_w["wind_speed"]
+                        
+                # Fallback if both fail
+                if temp is None: temp = 25.0
+                if humi is None: humi = 60.0
+                if wind is None: wind = 10.0
                 
                 return AQIService._format_response(city, aqi, pm25, pm10, no2, so2, co, temp, humi, wind)
         except Exception as e:
@@ -463,9 +533,16 @@ class AQIService:
                 else:
                     aqi = int((300 - 201) / (250.4 - 150.5) * (pm25 - 150.5) + 201)
 
-                temp = random.randint(15, 35)
-                humi = random.randint(30, 85)
-                wind = random.randint(2, 20)
+                # If weather values are missing, fetch from Open-Meteo
+                om_w = AQIService._fetch_openmeteo_current(city)
+                if om_w:
+                    temp = om_w["temperature"]
+                    humi = om_w["humidity"]
+                    wind = om_w["wind_speed"]
+                else:
+                    temp = 25.0
+                    humi = 60.0
+                    wind = 10.0
                 
                 return AQIService._format_response(city, aqi, pm25, pm10, no2, so2, co, temp, humi, wind)
         except Exception as e:
@@ -480,7 +557,8 @@ class AQIService:
         base = city_info["base_aqi"]
         
         # 1. Hour factor (diurnal curve: traffic peaks at 8-10 AM and 6-9 PM)
-        now = datetime.now()
+        tz_name = get_city_timezone(city)
+        now = datetime.now(ZoneInfo(tz_name))
         hour = now.hour
         diurnal_multiplier = 1.0 + 0.35 * math.sin((hour - 8) * math.pi / 6) if (6 <= hour <= 12) else 1.0
         if 17 <= hour <= 22:
@@ -528,7 +606,8 @@ class AQIService:
         base = city_info["base_aqi"]
         
         data_points = []
-        end_time = datetime.now()
+        tz_name = get_city_timezone(city)
+        end_time = datetime.now(ZoneInfo(tz_name))
         start_time = end_time - timedelta(days=days)
         
         current_cursor = start_time
@@ -615,6 +694,8 @@ class AQIService:
             category = "Hazardous"
             
         city_coords = CITIES_COORDS.get(city, {"lat": 12.9716, "lon": 77.5946})
+        tz_name = get_city_timezone(city)
+        local_now = datetime.now(ZoneInfo(tz_name))
 
         return {
             "city": city,
@@ -631,5 +712,5 @@ class AQIService:
             "wind_speed": round(wind, 1),
             "lat": city_coords.get("lat", 12.9716),
             "lon": city_coords.get("lon", 77.5946),
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            "timestamp": local_now.strftime("%Y-%m-%d %H:%M:%S")
         }

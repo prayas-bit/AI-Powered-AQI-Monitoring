@@ -1,10 +1,11 @@
 import io
 from flask import Blueprint, request, send_file, jsonify
 from models.db import db
-from services.aqi_service import AQIService
+from services.aqi_service import AQIService, get_city_timezone
 from ml.predict import predict_future_aqi
 from routes.prediction import generate_safety_recommendations
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 reports_bp = Blueprint("reports", __name__)
 
@@ -56,6 +57,8 @@ def download_pdf():
             unsafe_days_list.append((date_str, round(day_avg, 1)))
 
     rec = generate_safety_recommendations(current_data["aqi"])
+    tz_name = get_city_timezone(city)
+    local_now = datetime.now(ZoneInfo(tz_name))
 
     if not REPORTLAB_AVAILABLE:
         # Return structured JSON data if ReportLab library is missing, allowing client to compile via jsPDF
@@ -63,7 +66,7 @@ def download_pdf():
             "message": "ReportLab package not available. Falling back to JSON report payload.",
             "data": {
                 "city": city,
-                "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "generated_at": local_now.strftime("%Y-%m-%d %H:%M:%S"),
                 "current_aqi": current_data["aqi"],
                 "category": current_data["category"],
                 "average_aqi_7_days": avg_aqi,
@@ -145,7 +148,7 @@ def download_pdf():
     
     # Document Header
     story.append(Paragraph("AI-Powered AQI Prediction Safety Report", title_style))
-    story.append(Paragraph(f"Location: {city} | Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} (UTC) | Status: Official Environmental Log", subtitle_style))
+    story.append(Paragraph(f"Location: {city} | Generated on: {local_now.strftime('%Y-%m-%d %H:%M:%S')} ({tz_name}) | Status: Official Environmental Log", subtitle_style))
     story.append(Spacer(1, 10))
     
     # Section 1: Executive AQI Summary
